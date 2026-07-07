@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 import math
 
+from benchmark.comparability import artifact_kind
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,31 +44,13 @@ def _tally_counts(result: dict) -> tuple[int, int, int] | None:
     return counts[0], counts[1], counts[2]
 
 
-def summarize_win_rate(result) -> dict:
-    """Return win-rate summary for a replay ``result`` artifact."""
-    result = _dict(result)
-    counts = _tally_counts(result)
-    if counts is None:
-        return {
-            "total": None,
-            "challenger": None,
-            "baseline": None,
-            "tie": None,
-            "challenger_rate": None,
-            "baseline_rate": None,
-            "tie_rate": None,
-        }
-    challenger, baseline, tie = counts
+def _rates(challenger: int, baseline: int, tie: int) -> dict:
+    """Build the rate block from challenger/baseline/tie counts (rates ``None`` when total 0)."""
     total = challenger + baseline + tie
     if total == 0:
         return {
-            "total": 0,
-            "challenger": 0,
-            "baseline": 0,
-            "tie": 0,
-            "challenger_rate": None,
-            "baseline_rate": None,
-            "tie_rate": None,
+            "total": 0, "challenger": 0, "baseline": 0, "tie": 0,
+            "challenger_rate": None, "baseline_rate": None, "tie_rate": None,
         }
     return {
         "total": total,
@@ -77,6 +61,58 @@ def summarize_win_rate(result) -> dict:
         "baseline_rate": round(baseline / total, 3),
         "tie_rate": round(tie / total, 3),
     }
+
+
+def _none_summary() -> dict:
+    return {
+        "total": None, "challenger": None, "baseline": None, "tie": None,
+        "challenger_rate": None, "baseline_rate": None, "tie_rate": None,
+    }
+
+
+def _slice_summary(slice_) -> dict:
+    """``total``/counts/rates for one replay slice's ``tally`` (``None`` block when malformed)."""
+    counts = _tally_counts(_dict(slice_))
+    if counts is None:
+        return _none_summary()
+    return _rates(*counts)
+
+
+def _combined(tuned: dict, held_out: dict) -> dict:
+    """Overall win rate across partitions — only when both carry complete tallies.
+
+    Sums the ``challenger``/``baseline``/``tie`` counts of the two partition summaries, mirroring
+    the sibling share/rate utilities (``offline_share``, ``order_agree_rate``, ...). Returns an
+    all-``None`` block when either partition's counts are unavailable.
+    """
+    challengers = [tuned.get("challenger"), held_out.get("challenger")]
+    baselines = [tuned.get("baseline"), held_out.get("baseline")]
+    ties = [tuned.get("tie"), held_out.get("tie")]
+    if not all(_is_int(v) for v in challengers + baselines + ties):
+        return _none_summary()
+    return _rates(sum(challengers), sum(baselines), sum(ties))
+
+
+def summarize_win_rate(result) -> dict:
+    """Return win-rate summary for a replay ``result`` artifact.
+
+    Single- and multi-repo artifacts report a top-level tally; a ``generalization`` artifact has no
+    top-level tally — each ``tuned``/``held_out`` partition carries its own — so its overall rate is
+    summed across the two partitions (``None`` unless both carry complete tallies), with the
+    per-partition summaries exposed under ``partitions``. This mirrors the sibling share/rate
+    utilities (``offline_share``, ``order_agree_rate``, ``tie_order_share``, ...).
+    """
+    result = _dict(result)
+    kind = artifact_kind(result)
+    if kind == "generalization":
+        tuned = _slice_summary(result.get("tuned"))
+        held_out = _slice_summary(result.get("held_out"))
+        return {
+            "kind": kind,
+            **_combined(tuned, held_out),
+            "partitions": {"tuned": tuned, "held_out": held_out},
+        }
+    return {"kind": kind, **_slice_summary(result), "partitions": None}
 
 
 def _fmt_rate(value) -> str:

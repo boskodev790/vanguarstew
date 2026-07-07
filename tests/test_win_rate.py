@@ -57,6 +57,51 @@ def test_non_dict_artifact_yields_none():
     assert out["total"] is None
 
 
+def test_single_and_multi_expose_kind_and_no_partitions():
+    single = summarize_win_rate(_run({"challenger": 6, "baseline": 3, "tie": 1}))
+    assert single["kind"] == "single" and single["partitions"] is None
+    multi = summarize_win_rate({"per_repo": [], "tally": {"challenger": 2, "baseline": 2, "tie": 0}})
+    assert multi["kind"] == "multi" and multi["partitions"] is None
+    assert multi["challenger_rate"] == 0.5
+
+
+# --- #1121: a generalization artifact sums partition tallies like its sibling utilities ------
+# run_generalization_report has no top-level tally; each tuned/held_out partition carries its own.
+# The overall rate must sum the partitions (mirroring offline_share / order_agree_rate), not report
+# n/a, and the per-partition summaries are exposed under `partitions`.
+
+
+def _gen(tuned_tally, held_tally, gap=0.0):
+    return {"generalization_gap": gap, "tuned": {"tally": tuned_tally}, "held_out": {"tally": held_tally}}
+
+
+def test_generalization_sums_partition_tallies():
+    out = summarize_win_rate(_gen({"challenger": 4, "baseline": 1, "tie": 1},
+                                  {"challenger": 1, "baseline": 2, "tie": 0}))
+    assert out["kind"] == "generalization"
+    assert out["challenger"] == 5 and out["baseline"] == 3 and out["tie"] == 1 and out["total"] == 9
+    assert out["challenger_rate"] == round(5 / 9, 3)   # 0.556, not n/a
+    assert out["baseline_rate"] == round(3 / 9, 3)
+    assert out["partitions"]["tuned"]["challenger_rate"] == round(4 / 6, 3)
+    assert out["partitions"]["held_out"]["challenger_rate"] == round(1 / 3, 3)
+
+
+def test_generalization_partial_partition_withholds_overall():
+    # held_out has no usable tally -> overall is None, but tuned's own summary is still reported.
+    out = summarize_win_rate({"generalization_gap": 0.0,
+                              "tuned": {"tally": {"challenger": 4, "baseline": 1, "tie": 1}},
+                              "held_out": {}})
+    assert out["challenger_rate"] is None and out["total"] is None
+    assert out["partitions"]["tuned"]["challenger"] == 4
+    assert out["partitions"]["held_out"]["total"] is None
+
+
+def test_generalization_zero_total_yields_none_rates():
+    out = summarize_win_rate(_gen({"challenger": 0, "baseline": 0, "tie": 0},
+                                  {"challenger": 0, "baseline": 0, "tie": 0}))
+    assert out["total"] == 0 and out["challenger_rate"] is None
+
+
 def test_headline_happy_path():
     out = summarize_win_rate(_run({"challenger": 2, "baseline": 1, "tie": 0}))
     assert "challenger 2/3" in win_rate_headline(out)
