@@ -474,6 +474,45 @@ def test_context_from_git_readme_probe_matches_build_context(readme_path, conten
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_context_from_git_skips_empty_higher_priority_readme():
+    # An empty higher-priority README (README.md) must not stop the probe: both build_context
+    # (truthy `if content:`) and the git fallback skip it and surface the populated lower-priority
+    # README.rst, so readme_excerpt stays aligned across the two context paths (#1116).
+    repo = tempfile.mkdtemp()
+    try:
+        _init_repo(repo)
+        _write(repo, "README.md", "")                 # empty, higher priority
+        _write(repo, "README.rst", "Real overview\n")  # populated, lower priority
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "c1")
+
+        fallback = _context_from_git(repo)["readme_excerpt"]
+        harness = build_context(repo, "HEAD")["readme_excerpt"]
+        assert fallback == harness == "Real overview\n"
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_context_from_git_yields_empty_when_all_readmes_empty():
+    # When every probed README is empty, the fallback surfaces "" (no populated file to find),
+    # matching build_context — the fix skips empties, it does not invent content.
+    repo = tempfile.mkdtemp()
+    try:
+        _init_repo(repo)
+        _write(repo, "README.md", "")
+        _write(repo, "README.rst", "")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "c1")
+
+        fallback = _context_from_git(repo)["readme_excerpt"]
+        harness = build_context(repo, "HEAD")["readme_excerpt"]
+        assert fallback == harness == ""
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_context_from_git_excludes_tags_unreachable_from_head():
     # A tag that exists only on an unmerged branch isn't an ancestor of HEAD, so it wasn't
     # knowable at T -- the fallback context must not surface it as a "release".

@@ -219,9 +219,15 @@ def _context_from_git(repo_path: str) -> dict:
     readme = ""
     for name in README_PROBE_NAMES:
         p = os.path.join(repo_path, name)
-        if os.path.exists(p):
-            with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                readme = _mask_forward_refs(f.read()[:4000])
+        if not os.path.exists(p):
+            continue
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        # Mirror build_context's `if content:` check: an empty higher-priority README is skipped
+        # so probing continues to a populated lower-priority one, keeping the git fallback's
+        # readme_excerpt aligned with the frozen snapshot's (#916/#937 invariant).
+        if content:
+            readme = _mask_forward_refs(content[:4000])
             break
     return {
         "frozen_at": {"commit": head[:10], "date": freeze_date},
