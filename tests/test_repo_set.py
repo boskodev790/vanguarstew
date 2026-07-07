@@ -178,23 +178,45 @@ def test_load_reports_a_directory_path_as_a_clean_error(tmp_path):
     assert "not found" not in str(exc.value) and "invalid JSON" not in str(exc.value)
 
 
-def test_load_distinguishes_not_found_directory_and_bad_json(tmp_path):
-    # The three failure modes stay three distinct messages — proving the OSError branch does not
-    # swallow the not-found case (FileNotFoundError is an OSError subclass, caught first).
+def test_load_reports_a_non_utf8_config_as_a_clean_error(tmp_path):
+    # A file that exists and is readable but is not valid UTF-8 makes json.load raise
+    # UnicodeDecodeError (a ValueError subclass — not JSONDecodeError, not OSError). It must
+    # surface as a clean RepoSetError, not a raw traceback (#1090).
+    bad = tmp_path / "utf16.json"
+    bad.write_bytes('{"repos": []}'.encode("utf-16"))   # BOM + null bytes: invalid UTF-8
+    with pytest.raises(RepoSetError, match="not valid UTF-8") as exc:
+        load_repo_set(str(bad))
+    assert "invalid JSON" not in str(exc.value)          # distinct from the JSON-parse branch
+
+
+def test_load_reports_a_binary_config_as_a_clean_error(tmp_path):
+    # A binary file passed by mistake also fails to decode as UTF-8.
+    bad = tmp_path / "blob.bin"
+    bad.write_bytes(b"\xff\xfe\x00\x01\x80\x81")
+    with pytest.raises(RepoSetError, match="not valid UTF-8"):
+        load_repo_set(str(bad))
+
+
+def test_load_distinguishes_not_found_directory_bad_json_and_non_utf8(tmp_path):
+    # The four failure modes stay four distinct messages — proving the new UnicodeDecodeError
+    # branch does not swallow (or get swallowed by) the not-found / unreadable / bad-JSON cases.
     missing = tmp_path / "gone.json"
     a_dir = tmp_path / "dir"
     a_dir.mkdir()
     bad = tmp_path / "bad.json"
     bad.write_text("{nope", encoding="utf-8")
+    nonutf8 = tmp_path / "utf16.json"
+    nonutf8.write_bytes('{"repos": []}'.encode("utf-16"))
     messages = {}
-    for label, path in (("missing", missing), ("dir", a_dir), ("bad", bad)):
+    for label, path in (("missing", missing), ("dir", a_dir), ("bad", bad), ("nonutf8", nonutf8)):
         with pytest.raises(RepoSetError) as exc:
             load_repo_set(str(path))
         messages[label] = str(exc.value)
     assert "not found" in messages["missing"]
     assert "cannot read repo-set config" in messages["dir"]
     assert "invalid JSON" in messages["bad"]
-    assert len(set(messages.values())) == 3
+    assert "not valid UTF-8" in messages["nonutf8"]
+    assert len(set(messages.values())) == 4
 
 
 def test_load_reports_an_unreadable_file_as_a_clean_error(tmp_path):
