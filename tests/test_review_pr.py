@@ -264,6 +264,18 @@ def test_gh_raises_a_placeholder_when_gh_produced_no_stderr():
             _gh("pr", "view", "1")
 
 
+def test_gh_raises_a_clean_error_when_the_gh_binary_is_missing():
+    # gh not installed / not on PATH: subprocess.run raises FileNotFoundError at the spawn site
+    # (an OSError, not the RuntimeError callers catch). _gh converts it to a clean, actionable
+    # RuntimeError with an install hint instead of letting a raw traceback escape (#1158).
+    with patch("subprocess.run", side_effect=FileNotFoundError(2, "No such file or directory", "gh")):
+        with pytest.raises(RuntimeError) as exc:
+            _gh("pr", "view", "1", "-R", "o/r")
+    message = str(exc.value)
+    assert "gh" in message and "PATH" in message
+    assert "Traceback" not in message
+
+
 def test_fetch_pr_propagates_gh_failure_without_a_json_decode_error():
     stderr = "GraphQL: Could not resolve to a Repository with the name 'o/r'. (repository)"
     with patch("subprocess.run", side_effect=_fake_run(returncode=1, stderr=stderr)):
@@ -291,6 +303,19 @@ def test_main_reports_a_clean_error_instead_of_a_raw_gh_failure(monkeypatch):
         with pytest.raises(SystemExit) as exc:
             main()
     assert exc.value.code == 1
+
+
+def test_main_reports_a_clean_error_when_gh_is_not_installed(monkeypatch, capsys):
+    # gh missing from PATH is an ordinary first-run condition; main() must print the install hint
+    # and exit 1 (via the RuntimeError _gh now raises), not dump a FileNotFoundError traceback.
+    monkeypatch.setattr(sys, "argv", ["review_pr.py", "--repo", "o/r", "--pr", "1"])
+    with patch("subprocess.run", side_effect=FileNotFoundError(2, "No such file or directory", "gh")):
+        with pytest.raises(SystemExit) as exc:
+            main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "gh" in err and "PATH" in err
+    assert "Traceback" not in err
 
 
 def test_main_reports_a_clean_error_instead_of_a_raw_pr_not_found(monkeypatch, capsys):
