@@ -28,6 +28,14 @@ def load_artifact(path: str) -> dict:
     except FileNotFoundError:
         print(f"artifact not found: {path}", file=sys.stderr)
         raise SystemExit(2) from None
+    except OSError as exc:
+        # FileNotFoundError is handled above; every other open()/read failure lands here. A
+        # directory path (IsADirectoryError) or an unreadable file (PermissionError) is the common
+        # case, but `except OSError` also covers its other subclasses — BlockingIOError,
+        # TimeoutError, and the rest — that a networked filesystem can raise. Distinct from
+        # "not found" (the path exists) and "not valid JSON" (it was never read as text).
+        print(f"cannot read artifact ({path}): {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     except json.JSONDecodeError as exc:
         print(f"artifact is not valid JSON ({path}): {exc}", file=sys.stderr)
         raise SystemExit(2) from None

@@ -5,6 +5,8 @@ import logging
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -16,6 +18,8 @@ from benchmark.sample_adequacy import (  # noqa: E402
     failed_checks,
     sample_adequacy_headline,
 )
+from scripts import sample_adequacy as cli  # noqa: E402
+from scripts.sample_adequacy import load_artifact  # noqa: E402
 
 
 def _run(tasks, challenger=None, baseline=None, tie=None):
@@ -345,3 +349,97 @@ def test_check_sample_adequacy_does_not_mutate_the_result():
     snapshot = copy.deepcopy(run)
     check_sample_adequacy(run)
     assert run == snapshot
+
+
+# --- #1073: load_artifact reports an unreadable path cleanly, not as a raw traceback ----------
+# The FileNotFoundError branch handles a missing path; a directory or an unreadable file reaches
+# open() and raises IsADirectoryError/PermissionError (both OSError). load_artifact must exit 2
+# with a clean "cannot read" message, distinct from "not found" and "not valid JSON".
+
+
+def _load_exit(path):
+    with pytest.raises(SystemExit) as exc:
+        load_artifact(str(path))
+    return exc.value.code
+
+
+def test_load_artifact_reports_a_directory_path_as_cannot_read(tmp_path, capsys):
+    a_dir = tmp_path / "a_dir"
+    a_dir.mkdir()
+    assert _load_exit(a_dir) == 2
+    err = capsys.readouterr().err
+    assert "cannot read artifact" in err
+    assert "not found" not in err and "not valid JSON" not in err
+
+
+def test_load_artifact_reports_an_unreadable_file_as_cannot_read(tmp_path, capsys):
+    # Portable: skip when the read isn't actually blocked (root / mode-ignoring filesystem),
+    # detected via os.access rather than os.geteuid so it also holds on non-POSIX platforms.
+    import stat
+
+    locked = tmp_path / "locked.json"
+    locked.write_text('{"tasks": 5}', encoding="utf-8")
+    locked.chmod(0)
+    if os.access(str(locked), os.R_OK):
+        locked.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        pytest.skip("cannot make a file unreadable in this environment (running as root?)")
+    try:
+        assert _load_exit(locked) == 2
+        assert "cannot read artifact" in capsys.readouterr().err
+    finally:
+        locked.chmod(stat.S_IRUSR | stat.S_IWUSR)  # let tmp_path cleanup remove it
+
+
+def test_load_artifact_catches_oserror_subclasses(tmp_path, capsys, monkeypatch):
+    # `except OSError` covers its subclasses; a BlockingIOError/TimeoutError from a networked
+    # filesystem is caught the same way, not leaked as a traceback. Force one deterministically.
+    real = tmp_path / "run.json"
+    real.write_text('{"tasks": 5}', encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise BlockingIOError("resource temporarily unavailable")
+
+    monkeypatch.setattr("builtins.open", boom)
+    assert _load_exit(real) == 2
+    assert "cannot read artifact" in capsys.readouterr().err
+
+
+def test_load_artifact_distinguishes_its_four_failure_modes(tmp_path, capsys):
+    # not-found / cannot-read / not-valid-JSON / not-an-object stay four distinct messages, so the
+    # new OSError branch does not swallow the existing ones (FileNotFoundError is caught first).
+    a_dir = tmp_path / "dir"
+    a_dir.mkdir()
+    bad = tmp_path / "bad.json"
+    bad.write_text("{nope", encoding="utf-8")
+    arr = tmp_path / "arr.json"
+    arr.write_text("[1, 2, 3]", encoding="utf-8")
+    cases = {"missing": tmp_path / "gone.json", "dir": a_dir, "bad": bad, "arr": arr}
+    messages = {}
+    for label, path in cases.items():
+        with pytest.raises(SystemExit) as exc:
+            load_artifact(str(path))
+        assert exc.value.code == 2
+        messages[label] = capsys.readouterr().err.strip()
+    assert "artifact not found" in messages["missing"]
+    assert "cannot read artifact" in messages["dir"]
+    assert "not valid JSON" in messages["bad"]
+    assert "must be a JSON object" in messages["arr"]
+    assert len(set(messages.values())) == 4
+
+
+def test_load_artifact_success_returns_the_object(tmp_path):
+    good = tmp_path / "ok.json"
+    good.write_text('{"tasks": 7}', encoding="utf-8")
+    assert load_artifact(str(good)) == {"tasks": 7}
+
+
+def test_cli_main_reports_cannot_read_for_a_directory(tmp_path, capsys, monkeypatch):
+    # End-to-end through main() with no subprocess and no cwd assumption: argv is set explicitly
+    # to an absolute directory path, so the run does not depend on the process working directory.
+    a_dir = tmp_path / "cfg_dir"
+    a_dir.mkdir()
+    monkeypatch.setattr(sys, "argv", ["sample_adequacy", str(a_dir)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 2
+    assert "cannot read artifact" in capsys.readouterr().err
