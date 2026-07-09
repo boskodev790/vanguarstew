@@ -18,9 +18,14 @@ the relevant checks rather than raising.
 
 from __future__ import annotations
 
+import logging
+
 from benchmark.trend import headline_score
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MIN_GAIN = 0.02
+_CHECK_ROW_KEYS = ("name", "passed")
 
 
 def _is_number(value) -> bool:
@@ -70,15 +75,85 @@ def check_improvement(candidate, baseline, min_gain: float = DEFAULT_MIN_GAIN) -
     }
 
 
+def _check_rows_list(checks) -> list[dict]:
+    """Return improvement gate-check rows for headline / failed_checks helpers.
+
+    ``None`` means the key is absent. An empty list means zero checks. Both are silent.
+    Non-list containers (scalars, dicts, tuples, ranges, strings, etc.) are warned and
+    treated as empty (never coerced). A usable row is a dict whose ``name`` is a ``str`` and
+    whose ``passed`` is a ``bool``; anything else is skipped with a warning.
+
+    Mirrors the sanitizer the other gate helpers use (``coverage``, ``component_floor``,
+    ``skip_budget``) so a hand-built or deserialized ``check_improvement`` result whose
+    ``checks`` is malformed degrades to "no checks" instead of crashing the helpers.
+    """
+    if checks is None:
+        return []
+    if not isinstance(checks, list):
+        logger.warning(
+            "improvement: checks is %s, not a list; treating as empty",
+            type(checks).__name__,
+        )
+        return []
+    rows = []
+    for idx, row in enumerate(checks):
+        if not isinstance(row, dict):
+            logger.warning(
+                "improvement: checks[%s] is %s, not an object; skipping",
+                idx,
+                type(row).__name__,
+            )
+            continue
+        missing = [key for key in _CHECK_ROW_KEYS if key not in row]
+        if missing:
+            logger.warning(
+                "improvement: checks[%s] missing required key(s) %s; skipping",
+                idx,
+                missing,
+            )
+            continue
+        if not isinstance(row["name"], str):
+            logger.warning(
+                "improvement: checks[%s] name is %s, not str; skipping",
+                idx,
+                type(row["name"]).__name__,
+            )
+            continue
+        if type(row["passed"]) is not bool:
+            logger.warning(
+                "improvement: checks[%s] passed is %s, not bool; skipping",
+                idx,
+                type(row["passed"]).__name__,
+            )
+            continue
+        rows.append(row)
+    if checks and not rows:
+        logger.warning(
+            "improvement: checks had %d entr%s but no usable rows",
+            len(checks),
+            "y" if len(checks) == 1 else "ies",
+        )
+    return rows
+
+
 def failed_checks(result: dict) -> list:
-    """The names of the checks that failed in a :func:`check_improvement` result."""
-    return [c["name"] for c in _dict(result).get("checks", []) if not c.get("passed")]
+    """The names of the checks that failed in a :func:`check_improvement` result.
+
+    Tolerant of a malformed ``checks`` field (absent, non-list, or unusable rows): those
+    entries are warned and skipped via :func:`_check_rows_list` rather than raising, matching
+    the other gate helpers.
+    """
+    return [c["name"] for c in _check_rows_list(_dict(result).get("checks")) if not c["passed"]]
 
 
 def improvement_headline(result: dict) -> str:
-    """A one-line human summary of a :func:`check_improvement` result."""
+    """A one-line human summary of a :func:`check_improvement` result.
+
+    When ``checks`` is missing, empty, a non-list container, or contains only unusable rows,
+    returns ``"improvement: no checks evaluated"`` after logging any warnings.
+    """
     result = _dict(result)
-    checks = result.get("checks") or []
+    checks = _check_rows_list(result.get("checks"))
     if not checks:
         return "improvement: no checks evaluated"
     if result.get("passed"):

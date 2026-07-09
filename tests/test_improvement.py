@@ -1,8 +1,11 @@
 """Tests for the candidate-vs-baseline improvement (adoption) gate (deterministic, offline)."""
 
 import copy
+import logging
 import os
 import sys
+
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -10,6 +13,7 @@ if ROOT not in sys.path:
 
 from benchmark.improvement import (  # noqa: E402
     DEFAULT_MIN_GAIN,
+    _check_rows_list,
     check_improvement,
     failed_checks,
     improvement_headline,
@@ -140,3 +144,85 @@ def test_check_improvement_does_not_mutate_inputs():
     snap_b, snap_c = copy.deepcopy(baseline), copy.deepcopy(candidate)
     check_improvement(candidate, baseline)
     assert baseline == snap_b and candidate == snap_c
+
+
+# --- #1110: checks-row sanitization so the helpers never crash on a non-list checks ---
+
+_MALFORMED_CHECKS = [
+    42, 3.14, True, {"name": "both_scored"}, "garbage",
+    ({"name": "both_scored", "passed": False},),
+    range(2),
+]
+_FALSY_SCALAR_CHECKS = [0, 0.0, False, ""]
+
+
+def test_failed_checks_survives_a_non_list_checks_field():
+    # Before #1110: 'for c in "garbage"' iterated characters and 'garbage'[i].get(...) had no
+    # .get -> AttributeError. Must degrade to "no failed checks", not crash.
+    assert failed_checks({"checks": "garbage"}) == []
+    for bad in _MALFORMED_CHECKS:
+        assert failed_checks({"checks": bad}) == [], bad
+
+
+def test_improvement_headline_survives_a_non_list_checks_field():
+    # 'garbage' is truthy, so the old `result.get("checks") or []` passed it into len()/failed_checks
+    # and crashed. Must read as "no checks evaluated".
+    assert improvement_headline({"checks": "garbage"}) == "improvement: no checks evaluated"
+    for bad in _MALFORMED_CHECKS:
+        assert improvement_headline({"checks": bad}) == "improvement: no checks evaluated", bad
+
+
+def test_check_rows_list_accepts_only_real_lists():
+    rows = [{"name": "both_scored", "passed": True}]
+    for bad in _MALFORMED_CHECKS:
+        assert _check_rows_list(bad) == [], bad
+    assert _check_rows_list(rows) == rows
+    assert _check_rows_list(None) == []
+    assert _check_rows_list([]) == []
+
+
+def test_check_rows_list_skips_unusable_rows_but_keeps_good_ones():
+    checks = [
+        {"name": "both_scored", "passed": True},
+        {"name": "improves_by_margin"},              # missing 'passed' -> skipped
+        {"name": 7, "passed": False},                # non-str name -> skipped
+        {"name": "improves_by_margin", "passed": 1},  # non-bool passed -> skipped
+        {"name": "improves_by_margin", "passed": False},
+    ]
+    assert _check_rows_list(checks) == [
+        {"name": "both_scored", "passed": True},
+        {"name": "improves_by_margin", "passed": False},
+    ]
+
+
+@pytest.mark.parametrize("bad", _FALSY_SCALAR_CHECKS)
+def test_check_rows_list_treats_falsy_scalars_as_non_list(bad, caplog):
+    with caplog.at_level(logging.WARNING, logger="benchmark.improvement"):
+        assert _check_rows_list(bad) == []
+    assert any("not a list" in r.message for r in caplog.records)
+
+
+def test_check_rows_list_absent_and_empty_are_silent(caplog):
+    with caplog.at_level(logging.WARNING, logger="benchmark.improvement"):
+        assert _check_rows_list(None) == []
+        assert _check_rows_list([]) == []
+    assert not caplog.records
+
+
+def test_check_rows_list_warns_when_no_row_is_usable(caplog):
+    with caplog.at_level(logging.WARNING, logger="benchmark.improvement"):
+        assert _check_rows_list([{"name": 7, "passed": False}]) == []
+    assert any("no usable rows" in r.message for r in caplog.records)
+
+
+def test_check_rows_list_skips_non_dict_elements_inside_the_list(caplog):
+    checks = [42, "garbage", {"name": "both_scored", "passed": True}]
+    with caplog.at_level(logging.WARNING, logger="benchmark.improvement"):
+        assert _check_rows_list(checks) == [{"name": "both_scored", "passed": True}]
+    assert any("not an object" in r.message for r in caplog.records)
+
+
+def test_a_well_formed_result_is_unaffected_by_the_sanitizer():
+    result = check_improvement(_run(0.55), _run(0.60), min_gain=0.02)  # candidate worse -> HOLD
+    assert failed_checks(result) == ["improves_by_margin"]
+    assert improvement_headline(result).startswith("improvement: HOLD")
